@@ -108,7 +108,15 @@ with st.sidebar:
 
     country = st.selectbox("国コード", ["JP", "US", "EP", "CN", "KR", "DE", "FR", "GB"], index=0)
 
-    st.subheader("絞り込み（スキャン量削減）")
+    st.subheader("絞り込み（結果フィルタ）")
+
+    if not _USE_STAGING:
+        st.info(
+            "元テーブルでは年・種別フィルタは **結果件数を絞る**だけで"
+            "スキャン量は変わりません。\n"
+            "スキャン量を削減するには **ステージングテーブル**を使ってください。",
+            icon="ℹ️",
+        )
 
     this_year = 2025
     year_range = st.slider(
@@ -116,7 +124,7 @@ with st.sidebar:
         min_value=1976,
         max_value=this_year,
         value=(2010, this_year),
-        help="publication_date パーティションに効く。範囲を狭めるとスキャン量が減る",
+        help="結果を絞る。ステージングテーブル使用時のみスキャン量も削減される。",
     )
     year_from, year_to = year_range
 
@@ -131,7 +139,7 @@ with st.sidebar:
         "文献種別 (kind_code)",
         options=list(KIND_OPTIONS.keys()),
         default=["A — 公開特許公報（未審査）", "B — 特許公報（登録）"],
-        help="絞るほどスキャン量は減るが、country_code と異なりパーティション列ではない",
+        help="結果を絞る。ステージングテーブル使用時のみスキャン量も削減される。",
     )
     kind_codes = [KIND_OPTIONS[k] for k in selected_kinds] or None
 
@@ -195,6 +203,13 @@ if estimate_button:
             c1.metric("推定スキャン量", f"{gb:.1f} GB")
             c2.metric("上限設定", f"{max_gb:.0f} GB", delta=f"余裕 {max_gb - gb:.0f} GB" if gb < max_gb else "超過")
             c3.metric("推定コスト / 回", f"${cost_usd:.2f}" if cost_usd > 0 else "無料枠内")
+
+            if not _USE_STAGING:
+                st.caption(
+                    "年・種別フィルタを変えてもスキャン量は変わりません。"
+                    "元テーブルは `publication_date` INTEGER ではパーティション pruning が効かないためです。"
+                    "スキャン量を減らすには `create_staging.py` でステージングテーブルを作成してください。"
+                )
 
             if gb > max_gb:
                 st.error(f"上限超過。Secrets の `MAX_GB_PER_QUERY` を `\"{int(gb) + 10}\"` 以上にしてください。")
