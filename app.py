@@ -154,7 +154,7 @@ if run_button:
             "公開日": fmt_date(row.publication_date),
             "出願人": row.assignees or "",
             "発明者": row.inventors or "",
-            "IPC": row.ipc_first or "",
+            "IPC": row.ipc_codes or "",
         }
         for row in rows
     ]

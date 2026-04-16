@@ -156,13 +156,12 @@ SELECT
   ) AS assignees,
   (
     SELECT STRING_AGG(inv.name, '; ')
-    FROM UNNEST(inventor) inv
+    FROM UNNEST(inventor_harmonized) inv
   ) AS inventors,
   (
     SELECT STRING_AGG(ip.code, '  ')
     FROM UNNEST(ipc) ip
-    WHERE ip.first = TRUE
-  ) AS ipc_first,
+  ) AS ipc_codes,
   (
     SELECT c.text
     FROM UNNEST(claims_localized) c
