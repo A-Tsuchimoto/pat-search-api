@@ -17,11 +17,12 @@ Streamlit Community Cloud へのデプロイ:
 """
 
 import os
+import re
 import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from google.api_core.exceptions import BadRequest
+from google.api_core.exceptions import BadRequest, Forbidden, NotFound, GoogleAPIError
 
 from search import TABLE, FIELD_CATALOG, build_query
 
@@ -46,7 +47,6 @@ def get_client() -> bigquery.Client:
         )
         project = st.secrets["gcp_service_account"]["project_id"]
     else:
-        # ローカル: ADC に任せる（creds=None で自動検出）
         creds = None
         project = (
             st.secrets.get("GCP_PROJECT_ID")
@@ -62,16 +62,61 @@ def get_client() -> bigquery.Client:
     return bigquery.Client(credentials=creds, project=project)
 
 
+def get_max_gb() -> float:
+    # Secrets → 環境変数 → デフォルト 200GB の順で取得
+    val = st.secrets.get("MAX_GB_PER_QUERY") or os.environ.get("MAX_GB_PER_QUERY", "200.0")
+    return float(val)
+
+
 def run_query(query: str) -> list:
     client = get_client()
-    max_gb = float(
-        st.secrets.get("MAX_GB_PER_QUERY")
-        or os.environ.get("MAX_GB_PER_QUERY", "1.0")
-    )
     job_config = bigquery.QueryJobConfig(
-        maximum_bytes_billed=int(max_gb * 1e9)
+        maximum_bytes_billed=int(get_max_gb() * 1e9)
     )
     return list(client.query(query, job_config=job_config).result())
+
+
+# ─── エラーハンドリング ───────────────────────────────────────────────────────
+def handle_bq_error(e: Exception) -> None:
+    """BigQuery エラーを分類して分かりやすいメッセージを表示する"""
+    err_str = str(e)
+
+    # ① スキャン量超過（bytesBilledLimitExceeded）
+    if "bytesBilledLimitExceeded" in err_str or "bytes billed" in err_str.lower():
+        m = re.search(r"(\d+) or higher required", err_str)
+        if m:
+            required_gb = int(m.group(1)) / 1e9
+            st.error(
+                f"スキャン量が上限を超えました。\n\n"
+                f"このクエリには **約 {required_gb:.0f} GB** のスキャンが必要です。\n"
+                f"Streamlit Cloud の **Settings > Secrets** で以下を更新してください：\n\n"
+                f"```toml\nMAX_GB_PER_QUERY = \"{int(required_gb) + 10}\"\n```"
+            )
+        else:
+            st.error(
+                "スキャン量が上限を超えました。\n"
+                "Secrets の `MAX_GB_PER_QUERY` を増やしてください（例: `\"200\"`）。"
+            )
+
+    # ② クエリ構文 / スキーマ不一致
+    elif isinstance(e, BadRequest) or "invalidQuery" in err_str or "Unrecognized name" in err_str:
+        st.error(f"クエリエラー（構文またはスキーマ不一致）:\n```\n{e}\n```")
+
+    # ③ 権限不足
+    elif isinstance(e, Forbidden) or "Access Denied" in err_str or "403" in err_str:
+        st.error(
+            "権限エラー: サービスアカウントに以下のロールがあるか確認してください。\n"
+            "- BigQuery ジョブユーザー\n"
+            "- BigQuery データ閲覧者"
+        )
+
+    # ④ テーブル・データセット不存在
+    elif isinstance(e, NotFound) or "Not found" in err_str:
+        st.error(f"テーブルが見つかりません: `{TABLE}`")
+
+    # ⑤ その他
+    else:
+        st.error(f"予期しないエラー:\n```\n{e}\n```")
 
 
 # ─── サイドバー ───────────────────────────────────────────────────────────────
@@ -98,6 +143,7 @@ with st.sidebar:
     run_button = st.button("検索する", type="primary", use_container_width=True)
 
     st.divider()
+    st.caption(f"スキャン上限: {get_max_gb():.0f} GB / クエリ")
     if st.toggle("出力可能フィールド一覧"):
         st.caption(f"テーブル: `{TABLE}`")
         for field, ftype, desc in FIELD_CATALOG:
@@ -122,17 +168,8 @@ if run_button:
     with st.spinner(f"検索中… ({', '.join(keywords)})"):
         try:
             rows = run_query(query)
-        except BadRequest as e:
-            if "exceeded" in str(e).lower() and "bytes" in str(e).lower():
-                st.error(
-                    "スキャン量が上限を超えたためクエリを中断しました。\n"
-                    "`MAX_GB_PER_QUERY` を増やすか、キーワードを絞ってください。"
-                )
-            else:
-                st.error(f"BigQuery エラー: {e}")
-            st.stop()
-        except Exception as e:
-            st.error(f"エラー: {e}")
+        except (BadRequest, Forbidden, NotFound, GoogleAPIError, Exception) as e:
+            handle_bq_error(e)
             st.stop()
 
     if not rows:
@@ -141,7 +178,6 @@ if run_button:
 
     st.success(f"{len(rows)} 件ヒット")
 
-    # テーブル表示
     def fmt_date(d):
         s = str(d) if d else ""
         return f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 else s
@@ -160,7 +196,6 @@ if run_button:
     ]
     st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
-    # 請求の範囲テキスト（トグル時）
     if show_claims:
         st.subheader("請求の範囲")
         for i, row in enumerate(rows, 1):
