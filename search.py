@@ -130,18 +130,46 @@ def show_schema():
 
 
 # ─── 特許検索 ────────────────────────────────────────────────────────────────
-def build_query(keywords: list[str], country: str, limit: int) -> str:
+def build_query(
+    keywords: list[str],
+    country: str,
+    limit: int,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    kind_codes: list[str] | None = None,
+) -> str:
     """
     請求の範囲（claims_localized）に全キーワードを含む特許を検索する SQL を生成する。
+
+    パーティション・フィルタ:
+      publication_date: 整数パーティション（YYYYMMDD）。year_from/year_to で範囲指定すると
+                        スキャン量を大幅に削減できる。
+      kind_code       : 文献種別（A=公開, B=登録, U=実用新案 等）。クラスタ列ではないが
+                        早期フィルタで処理量を減らせる。
     """
-    # 各キーワードを AND 条件として LIKE 句に展開
     kw_conditions = "\n          AND ".join(
         f"c.text LIKE '%{kw}%'" for kw in keywords
     )
 
+    # WHERE 条件を組み立て
+    conditions = [f"country_code = '{country}'"]
+    if year_from:
+        conditions.append(f"publication_date >= {year_from}0101")
+    if year_to:
+        conditions.append(f"publication_date <= {year_to}1231")
+    if kind_codes:
+        codes_str = ", ".join(f"'{k}'" for k in kind_codes)
+        conditions.append(f"kind_code IN ({codes_str})")
+    conditions.append(
+        f"EXISTS (\n    SELECT 1\n    FROM UNNEST(claims_localized) c\n"
+        f"    WHERE c.language = 'ja'\n          AND {kw_conditions}\n  )"
+    )
+    where_clause = "\n  AND ".join(conditions)
+
     query = f"""
 SELECT
   publication_number,
+  kind_code,
   (
     SELECT t.text
     FROM UNNEST(title_localized) t
@@ -159,7 +187,7 @@ SELECT
     FROM UNNEST(inventor_harmonized) inv
   ) AS inventors,
   (
-    SELECT STRING_AGG(ip.code, '  ')
+    SELECT STRING_AGG(ip.code, ' ')
     FROM UNNEST(ipc) ip
   ) AS ipc_codes,
   (
@@ -169,13 +197,7 @@ SELECT
     LIMIT 1
   ) AS claims_ja
 FROM `{TABLE}`
-WHERE country_code = '{country}'
-  AND EXISTS (
-    SELECT 1
-    FROM UNNEST(claims_localized) c
-    WHERE c.language = 'ja'
-          AND {kw_conditions}
-  )
+WHERE {where_clause}
 ORDER BY publication_date DESC
 LIMIT {limit}
 """
@@ -186,23 +208,25 @@ def search_patents(
     keywords: list[str],
     country: str = "JP",
     limit: int = 10,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    kind_codes: list[str] | None = None,
     dry_run: bool = False,
     show_claims: bool = False,
 ):
     client, job_config = get_client()
-    query = build_query(keywords, country, limit)
+    query = build_query(keywords, country, limit, year_from, year_to, kind_codes)
 
     print("\n=== 実行クエリ ===")
     print(query)
 
     if dry_run:
-        # ドライラン: スキャン量だけ確認してクエリは実行しない
         dry_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         job = client.query(query, job_config=dry_config)
         gb = job.total_bytes_processed / 1e9
         max_gb = float(os.environ.get("MAX_GB_PER_QUERY", "200.0"))
-        over = " ⚠️  上限超過！クエリは拒否されます" if gb > max_gb else " ✓ 上限内"
-        print(f"\n[DRY RUN] 推定スキャン量: {gb:.2f} GB / 上限 {max_gb:.1f} GB{over}")
+        over = " ⚠  上限超過！クエリは拒否されます" if gb > max_gb else " OK 上限内"
+        print(f"\n[DRY RUN] 推定スキャン量: {gb:.1f} GB / 上限 {max_gb:.0f} GB{over}")
         return
 
     print(f"\n検索中... (国={country}, キーワード={keywords}, 上限={limit}件)\n")
@@ -220,12 +244,12 @@ def search_patents(
         pub_date_fmt = f"{pub_date[:4]}-{pub_date[4:6]}-{pub_date[6:]}" if len(pub_date) == 8 else pub_date
         fil_date_fmt = f"{fil_date[:4]}-{fil_date[4:6]}-{fil_date[6:]}" if len(fil_date) == 8 else fil_date
 
-        print(f"[{i}] {row.publication_number}")
+        print(f"[{i}] {row.publication_number}  ({row.kind_code})")
         print(f"    タイトル  : {row.title_ja or '(なし)'}")
         print(f"    出願日    : {fil_date_fmt}  公開日: {pub_date_fmt}")
         print(f"    出願人    : {row.assignees or '(なし)'}")
         print(f"    発明者    : {row.inventors or '(なし)'}")
-    print(f"    IPC       : {row.ipc_codes or '(なし)'}")
+        print(f"    IPC       : {row.ipc_codes or '(なし)'}")
 
         if show_claims and row.claims_ja:
             wrapped = textwrap.fill(row.claims_ja[:800], width=90, initial_indent="    ", subsequent_indent="    ")
@@ -241,25 +265,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             使用例:
-              # スキーマ（出力可能フィールド）を確認
               python search.py --schema
-
-              # 請求の範囲に「電極」AND「酸素欠陥」を含む JP 公報を検索
               python search.py --keywords 電極 酸素欠陥
-
-              # 請求の範囲の本文も表示
-              python search.py --keywords 電極 酸素欠陥 --show-claims
-
-              # スキャン量だけ確認（課金なし）
-              python search.py --keywords 電極 酸素欠陥 --dry-run
-
-              # 件数・国を変更
-              python search.py --keywords 電極 酸素欠陥 --limit 5 --country JP
+              python search.py --keywords 電極 酸素欠陥 --year-from 2015 --year-to 2023
+              python search.py --keywords 電極 酸素欠陥 --kind A B --dry-run
+              python search.py --keywords 電極 酸素欠陥 --show-claims --limit 5
         """),
     )
     parser.add_argument("--schema", action="store_true", help="出力可能フィールド一覧を表示して終了")
     parser.add_argument("--keywords", nargs="+", default=["電極", "酸素欠陥"], help="請求の範囲で AND 検索するキーワード群")
     parser.add_argument("--country", default="JP", help="国コード（デフォルト: JP）")
+    parser.add_argument("--year-from", type=int, default=None, help="公開年 FROM（例: 2015）")
+    parser.add_argument("--year-to",   type=int, default=None, help="公開年 TO（例: 2023）")
+    parser.add_argument("--kind", nargs="+", default=None, help="文献種別（例: A B）")
     parser.add_argument("--limit", type=int, default=10, help="最大取得件数（デフォルト: 10）")
     parser.add_argument("--dry-run", action="store_true", help="クエリを実行せず推定スキャン量だけ表示")
     parser.add_argument("--show-claims", action="store_true", help="請求の範囲テキストも表示する")
@@ -274,6 +292,9 @@ def main():
         keywords=args.keywords,
         country=args.country,
         limit=args.limit,
+        year_from=args.year_from,
+        year_to=args.year_to,
+        kind_codes=args.kind,
         dry_run=args.dry_run,
         show_claims=args.show_claims,
     )
