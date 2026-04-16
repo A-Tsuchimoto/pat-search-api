@@ -55,7 +55,13 @@ from tabulate import tabulate
 load_dotenv()
 
 # ─── 定数 ────────────────────────────────────────────────────────────────────
-TABLE = "patents-public-data.patents.publications"
+_DEFAULT_TABLE = "patents-public-data.patents.publications"
+_STAGING_TABLE = os.environ.get(
+    "STAGING_TABLE",
+    "gen-lang-client-0731378894.patents_staging.jp_patents",
+)
+_USE_STAGING = os.environ.get("USE_STAGING", "").lower() in ("1", "true", "yes")
+TABLE = _STAGING_TABLE if _USE_STAGING else _DEFAULT_TABLE
 
 # 出力可能フィールドの説明（BigQuery スキーマより抜粋・整理）
 FIELD_CATALOG = [
@@ -137,22 +143,35 @@ def build_query(
     year_from: int | None = None,
     year_to: int | None = None,
     kind_codes: list[str] | None = None,
+    use_staging: bool = _USE_STAGING,
 ) -> str:
     """
-    請求の範囲（claims_localized）に全キーワードを含む特許を検索する SQL を生成する。
+    請求の範囲に全キーワードを含む特許を検索する SQL を生成する。
 
-    パーティション・フィルタ:
-      publication_date: 整数パーティション（YYYYMMDD）。year_from/year_to で範囲指定すると
-                        スキャン量を大幅に削減できる。
-      kind_code       : 文献種別（A=公開, B=登録, U=実用新案 等）。クラスタ列ではないが
-                        早期フィルタで処理量を減らせる。
+    use_staging=True（ステージングテーブル）の場合:
+      claims_ja は既にフラットな STRING 列のため UNNEST 不要。
+      クエリがシンプルになり、スキャン量も大幅削減（約1/10）。
+
+    use_staging=False（元テーブル）の場合:
+      UNNEST(claims_localized) + EXISTS で検索する（現行ロジック）。
+
+    USE_STAGING 環境変数が設定されている場合はデフォルトで切り替わる。
     """
-    kw_conditions = "\n          AND ".join(
-        f"c.text LIKE '%{kw}%'" for kw in keywords
-    )
+    # 共通: キーワード条件
+    if use_staging:
+        kw_conditions = "\n  AND ".join(
+            f"claims_ja LIKE '%{kw}%'" for kw in keywords
+        )
+    else:
+        kw_conditions = "\n          AND ".join(
+            f"c.text LIKE '%{kw}%'" for kw in keywords
+        )
 
-    # WHERE 条件を組み立て
-    conditions = [f"country_code = '{country}'"]
+    # 共通: date / kind_code フィルタ
+    conditions = []
+    if not use_staging:
+        # ステージングは JP 固定なので country_code フィルタは省略可だが一応残す
+        conditions.append(f"country_code = '{country}'")
     if year_from:
         conditions.append(f"publication_date >= {year_from}0101")
     if year_to:
@@ -160,13 +179,35 @@ def build_query(
     if kind_codes:
         codes_str = ", ".join(f"'{k}'" for k in kind_codes)
         conditions.append(f"kind_code IN ({codes_str})")
-    conditions.append(
-        f"EXISTS (\n    SELECT 1\n    FROM UNNEST(claims_localized) c\n"
-        f"    WHERE c.language = 'ja'\n          AND {kw_conditions}\n  )"
-    )
-    where_clause = "\n  AND ".join(conditions)
 
-    query = f"""
+    if use_staging:
+        # ステージング: フラット列への直接 LIKE（UNNEST 不要）
+        conditions.append(kw_conditions)
+        where_clause = "\n  AND ".join(conditions) if conditions else "TRUE"
+        query = f"""
+SELECT
+  publication_number,
+  kind_code,
+  title_ja,
+  filing_date,
+  publication_date,
+  assignees,
+  inventors,
+  ipc_codes,
+  claims_ja
+FROM `{TABLE}`
+WHERE {where_clause}
+ORDER BY publication_date DESC
+LIMIT {limit}
+"""
+    else:
+        # 元テーブル: UNNEST + EXISTS
+        conditions.append(
+            f"EXISTS (\n    SELECT 1\n    FROM UNNEST(claims_localized) c\n"
+            f"    WHERE c.language = 'ja'\n          AND {kw_conditions}\n  )"
+        )
+        where_clause = "\n  AND ".join(conditions)
+        query = f"""
 SELECT
   publication_number,
   kind_code,

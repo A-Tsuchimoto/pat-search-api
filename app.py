@@ -14,10 +14,18 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from google.api_core.exceptions import BadRequest, Forbidden, NotFound, GoogleAPIError
 
-from search import TABLE, FIELD_CATALOG, build_query
+from search import TABLE, FIELD_CATALOG, build_query, _USE_STAGING
 
 # ─── ページ設定 ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="特許検索", page_icon="🔍", layout="wide")
+
+# ─── Streamlit Secrets → 環境変数 bridge ─────────────────────────────────────
+# search.py の _USE_STAGING / TABLE は os.environ を参照するため、
+# Streamlit Cloud では secrets の値を env に反映してから import が必要だが、
+# モジュールは既にインポート済みのため、ここでは app.py 内の動作に影響する変数のみ橋渡し。
+for _key in ("USE_STAGING", "STAGING_TABLE", "MAX_GB_PER_QUERY"):
+    if _key in st.secrets and _key not in os.environ:
+        os.environ[_key] = str(st.secrets[_key])
 
 # ─── 認証・クライアント ───────────────────────────────────────────────────────
 @st.cache_resource
@@ -139,6 +147,10 @@ with st.sidebar:
         run_button = st.button("検索する", type="primary", use_container_width=True)
 
     st.caption(f"上限: {get_max_gb():.0f} GB / クエリ")
+    if _USE_STAGING:
+        st.caption(f"テーブル: ステージング `{TABLE.split('.')[-1]}`")
+    else:
+        st.caption("テーブル: 元テーブル（フルスキャン）")
 
     st.divider()
     if st.toggle("出力可能フィールド一覧"):
