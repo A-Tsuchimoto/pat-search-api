@@ -92,14 +92,20 @@ FIELD_CATALOG = [
 
 
 # ─── クライアント初期化 ───────────────────────────────────────────────────────
-def get_client() -> bigquery.Client:
+def get_client() -> tuple["bigquery.Client", "bigquery.QueryJobConfig"]:
     project = os.environ.get("GCP_PROJECT_ID")
     if not project:
         sys.exit(
             "[ERROR] GCP_PROJECT_ID が未設定です。\n"
             "  .env ファイルを作成し GCP_PROJECT_ID=<あなたのプロジェクト> を設定してください。"
         )
-    return bigquery.Client(project=project)
+
+    # 1 クエリあたりのスキャン上限（超えたらクエリを拒否して課金を防ぐ）
+    max_gb = float(os.environ.get("MAX_GB_PER_QUERY", "1.0"))
+    max_bytes = int(max_gb * 1e9)
+    job_config = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes)
+
+    return bigquery.Client(project=project), job_config
 
 
 # ─── スキーマ表示 ────────────────────────────────────────────────────────────
@@ -184,7 +190,7 @@ def search_patents(
     dry_run: bool = False,
     show_claims: bool = False,
 ):
-    client = get_client()
+    client, job_config = get_client()
     query = build_query(keywords, country, limit)
 
     print("\n=== 実行クエリ ===")
@@ -192,14 +198,16 @@ def search_patents(
 
     if dry_run:
         # ドライラン: スキャン量だけ確認してクエリは実行しない
-        job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
-        job = client.query(query, job_config=job_config)
+        dry_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+        job = client.query(query, job_config=dry_config)
         gb = job.total_bytes_processed / 1e9
-        print(f"\n[DRY RUN] 推定スキャン量: {gb:.2f} GB  ※実際の課金は無料枠内か確認してください")
+        max_gb = float(os.environ.get("MAX_GB_PER_QUERY", "1.0"))
+        over = " ⚠️  上限超過！クエリは拒否されます" if gb > max_gb else " ✓ 上限内"
+        print(f"\n[DRY RUN] 推定スキャン量: {gb:.2f} GB / 上限 {max_gb:.1f} GB{over}")
         return
 
     print(f"\n検索中... (国={country}, キーワード={keywords}, 上限={limit}件)\n")
-    rows = list(client.query(query).result())
+    rows = list(client.query(query, job_config=job_config).result())
 
     if not rows:
         print("ヒットなし")
