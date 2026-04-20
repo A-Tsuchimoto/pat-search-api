@@ -128,17 +128,31 @@ with st.sidebar:
     )
     year_from, year_to = year_range
 
-    # JP の主要文献種別
-    KIND_OPTIONS = {
-        "A — 公開特許公報（未審査）": "A",
-        "B — 特許公報（登録）": "B",
-        "U — 実用新案登録": "U",
-        "Y — 公開実用新案": "Y",
+    # 国別の主要文献種別
+    KIND_OPTIONS_BY_COUNTRY = {
+        "JP": {
+            "A — 公開特許公報（未審査）": "A",
+            "B — 特許公報（登録）": "B",
+            "U — 実用新案登録": "U",
+            "Y — 公開実用新案": "Y",
+        },
+        "US": {
+            "A1 — 公開出願": "A1",
+            "B1 — 登録特許（初回公開）": "B1",
+            "B2 — 登録特許（公開済）": "B2",
+        },
+        "EP": {
+            "A1 — 公開出願": "A1",
+            "A2 — 公開出願（サーチレポートなし）": "A2",
+            "B1 — 登録特許": "B1",
+        },
     }
+    KIND_OPTIONS = KIND_OPTIONS_BY_COUNTRY.get(country, {})
+    default_kinds = list(KIND_OPTIONS.keys())[:2] if KIND_OPTIONS else []
     selected_kinds = st.multiselect(
         "文献種別 (kind_code)",
         options=list(KIND_OPTIONS.keys()),
-        default=["A — 公開特許公報（未審査）", "B — 特許公報（登録）"],
+        default=default_kinds,
         help="結果を絞る。ステージングテーブル使用時のみスキャン量も削減される。",
     )
     kind_codes = [KIND_OPTIONS[k] for k in selected_kinds] or None

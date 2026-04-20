@@ -63,6 +63,18 @@ _STAGING_TABLE = os.environ.get(
 _USE_STAGING = os.environ.get("USE_STAGING", "").lower() in ("1", "true", "yes")
 TABLE = _STAGING_TABLE if _USE_STAGING else _DEFAULT_TABLE
 
+# 国コード → claims_localized / title_localized の language コード
+COUNTRY_LANG = {
+    "JP": "ja",
+    "US": "en",
+    "EP": "en",
+    "GB": "en",
+    "DE": "de",
+    "FR": "fr",
+    "CN": "zh",
+    "KR": "ko",
+}
+
 # 出力可能フィールドの説明（BigQuery スキーマより抜粋・整理）
 FIELD_CATALOG = [
     # 識別子
@@ -157,6 +169,8 @@ def build_query(
 
     USE_STAGING 環境変数が設定されている場合はデフォルトで切り替わる。
     """
+    lang = COUNTRY_LANG.get(country, "en")
+
     # 共通: キーワード条件
     if use_staging:
         kw_conditions = "\n  AND ".join(
@@ -204,7 +218,7 @@ LIMIT {limit}
         # 元テーブル: UNNEST + EXISTS
         conditions.append(
             f"EXISTS (\n    SELECT 1\n    FROM UNNEST(claims_localized) c\n"
-            f"    WHERE c.language = 'ja'\n          AND {kw_conditions}\n  )"
+            f"    WHERE c.language = '{lang}'\n          AND {kw_conditions}\n  )"
         )
         where_clause = "\n  AND ".join(conditions)
         query = f"""
@@ -214,7 +228,7 @@ SELECT
   (
     SELECT t.text
     FROM UNNEST(title_localized) t
-    WHERE t.language = 'ja'
+    WHERE t.language = '{lang}'
     LIMIT 1
   ) AS title_ja,
   filing_date,
@@ -234,7 +248,7 @@ SELECT
   (
     SELECT c.text
     FROM UNNEST(claims_localized) c
-    WHERE c.language = 'ja'
+    WHERE c.language = '{lang}'
     LIMIT 1
   ) AS claims_ja
 FROM `{TABLE}`
