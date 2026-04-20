@@ -173,8 +173,10 @@ def build_query(
 
     # 共通: キーワード条件
     if use_staging:
+        # SEARCH() は Search Index を使うため LIKE より大幅に高速
+        # 複数キーワードはそれぞれ AND 条件として渡す
         kw_conditions = "\n  AND ".join(
-            f"claims_ja LIKE '%{kw}%'" for kw in keywords
+            f"SEARCH(claims_ja, '{kw}')" for kw in keywords
         )
     else:
         kw_conditions = "\n          AND ".join(

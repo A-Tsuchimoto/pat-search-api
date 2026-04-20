@@ -159,6 +159,13 @@ def create_table(client: bigquery.Client, sql: str, full_table_id: str) -> None:
     print(f"  サイズ : {size_gb:.1f} GB")
 
 
+def create_search_index(client: bigquery.Client, full_table_id: str) -> None:
+    print(f"\nSearch Index を作成中（claims_ja 列）...")
+    sql = f"CREATE SEARCH INDEX claims_search_idx ON `{full_table_id}`(claims_ja)"
+    client.query(sql).result()
+    print("Search Index 作成完了")
+
+
 # ─── メイン ──────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -255,6 +262,7 @@ def main():
 
     try:
         create_table(client, sql, full_table_id)
+        create_search_index(client, full_table_id)
     except Conflict:
         print(
             f"\n[ERROR] テーブル `{full_table_id}` は既に存在します。\n"
